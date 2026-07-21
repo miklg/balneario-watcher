@@ -9,17 +9,21 @@ COVERMANAGER_URL = (
     "https://www.covermanager.com/reserve/crossellingFuture/"
 )
 
+RESERVATION_URL = (
+    "https://www.covermanager.com/reserve/module_restaurant/"
+    "restaurante-balneario.beach-club-tarifa/spanish"
+)
+
 RESTAURANT = "restaurante-balneario.beach-club-tarifa"
 PEOPLE = "4"
 REFERENCE_DATE = "2026-08-10"
 REFERENCE_HOUR = "15:00"
 
-INTERESTING_HOURS = {"13:30", "15:00"}
-
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-STATE_FILE = Path("balneario_estado.json")
+# Debe coincidir con el archivo que guarda GitHub Actions.
+STATE_FILE = Path("estado.json")
 
 
 def get_availability() -> dict[str, list[str]]:
@@ -36,10 +40,7 @@ def get_availability() -> dict[str, list[str]]:
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "application/json, text/plain, */*",
         "Origin": "https://www.covermanager.com",
-        "Referer": (
-            "https://www.covermanager.com/reserve/module_restaurant/"
-            "restaurante-balneario.beach-club-tarifa/spanish"
-        ),
+        "Referer": RESERVATION_URL,
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64) "
             "AppleWebKit/537.36 Chrome/150 Safari/537.36"
@@ -54,6 +55,11 @@ def get_availability() -> dict[str, list[str]]:
     )
     response.raise_for_status()
 
+    if not response.text.strip():
+        raise RuntimeError(
+            "CoverManager ha devuelto una respuesta vacía."
+        )
+
     try:
         data = response.json()
     except requests.JSONDecodeError as exc:
@@ -67,10 +73,13 @@ def get_availability() -> dict[str, list[str]]:
         date_value = item.get("date")
         available_hours = item.get("hoursdisp", [])
 
+        # Conservamos todas las horas disponibles.
         matching_hours = sorted(
-            hour
-            for hour in available_hours
-            if hour in INTERESTING_HOURS
+            {
+                str(hour).strip()
+                for hour in available_hours
+                if str(hour).strip()
+            }
         )
 
         if date_value and matching_hours:
@@ -84,14 +93,28 @@ def load_previous_state() -> dict[str, list[str]]:
         return {}
 
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(
+            STATE_FILE.read_text(encoding="utf-8")
+        )
+
+        if isinstance(state, dict):
+            return state
+
     except (json.JSONDecodeError, OSError):
-        return {}
+        pass
+
+    return {}
 
 
 def save_state(state: dict[str, list[str]]) -> None:
     STATE_FILE.write_text(
-        json.dumps(state, indent=2, ensure_ascii=False),
+        json.dumps(
+            state,
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -107,16 +130,39 @@ def send_telegram(message: str) -> None:
         json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
-            "disable_web_page_preview": True,
+            "disable_web_page_preview": False,
         },
         timeout=30,
     )
     response.raise_for_status()
 
+    result = response.json()
+
+    if not result.get("ok"):
+        raise RuntimeError(
+            f"Telegram rechazó el mensaje: {result}"
+        )
+
 
 def format_date(date_value: str) -> str:
     year, month, day = date_value.split("-")
     return f"{day}/{month}/{year}"
+
+
+def find_new_slots(
+    previous: dict[str, list[str]],
+    current: dict[str, list[str]],
+) -> list[tuple[str, str]]:
+    new_slots: list[tuple[str, str]] = []
+
+    for date_value, current_hours in current.items():
+        previous_hours = set(previous.get(date_value, []))
+
+        for hour in current_hours:
+            if hour not in previous_hours:
+                new_slots.append((date_value, hour))
+
+    return sorted(new_slots)
 
 
 def main() -> None:
@@ -126,27 +172,21 @@ def main() -> None:
     print("Disponibilidad actual:")
 
     if not current:
-        print("No hay disponibilidad para 13:30 ni 15:00.")
+        print("No hay disponibilidad.")
 
     for date_value, hours in sorted(current.items()):
         print(f"{format_date(date_value)}: {', '.join(hours)}")
 
-    new_slots: list[tuple[str, str]] = []
-
-    for date_value, current_hours in current.items():
-        previous_hours = previous.get(date_value, [])
-
-        for hour in current_hours:
-            if hour not in previous_hours:
-                new_slots.append((date_value, hour))
+    new_slots = find_new_slots(previous, current)
 
     if new_slots:
         lines = [
-            "🏖️ Nueva disponibilidad en Balneario Beach Club Tarifa",
+            "🏖️ Nueva disponibilidad",
+            "Balneario Beach Club Tarifa",
             "",
         ]
 
-        for date_value, hour in sorted(new_slots):
+        for date_value, hour in new_slots:
             lines.append(
                 f"📅 {format_date(date_value)}"
                 f" — 🕒 {hour}"
@@ -156,16 +196,14 @@ def main() -> None:
         lines.extend(
             [
                 "",
-                (
-                    "Reserva: https://www.covermanager.com/reserve/"
-                    "module_restaurant/"
-                    "restaurante-balneario.beach-club-tarifa/spanish"
-                ),
+                "Reserva cuanto antes:",
+                RESERVATION_URL,
             ]
         )
 
         send_telegram("\n".join(lines))
         print("Notificación enviada por Telegram.")
+
     else:
         print("No hay nuevas disponibilidades.")
 
