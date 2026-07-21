@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: balneario-watcher
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
